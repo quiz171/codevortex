@@ -33,6 +33,7 @@ export function ContactSection({
     referenceId: string;
     message: string;
   } | null>(null);
+  const [mailtoFallbackHref, setMailtoFallbackHref] = useState<string | null>(null);
   const [copiedEmail, setCopiedEmail] = useState(false);
 
   const nameInputRef = useRef<HTMLInputElement | null>(null);
@@ -53,6 +54,14 @@ export function ContactSection({
     } catch {
       setCopiedEmail(false);
     }
+  };
+
+  const buildMailtoLink = () => {
+    const encodedSubject = encodeURIComponent(subject.trim());
+    const encodedBody = encodeURIComponent(
+      `Name: ${name.trim()}\nEmail: ${email.trim()}\n\n${message.trim()}`
+    );
+    return `mailto:${BRAND_PROFILE.email}?subject=${encodedSubject}&body=${encodedBody}`;
   };
 
   const validateClient = (): FormErrors => {
@@ -77,6 +86,7 @@ export function ContactSection({
     e.preventDefault();
     setServerError(null);
     setConfirmation(null);
+    setMailtoFallbackHref(null);
 
     const clientErrors = validateClient();
     if (Object.keys(clientErrors).length > 0) {
@@ -87,45 +97,92 @@ export function ContactSection({
     setErrors({});
     setSubmitting(true);
 
+    const configuredEndpoint =
+      (import.meta.env.VITE_CONTACT_ENDPOINT as string | undefined)?.trim() ||
+      BRAND_PROFILE.formspreeEndpoint.trim();
+    const isFormspree = Boolean(configuredEndpoint);
+    const targetUrl = configuredEndpoint || '/api/contact';
+
     try {
-      const response = await fetch('/api/contact', {
+      const response = await fetch(targetUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: name.trim(),
-          email: email.trim(),
-          subject: subject.trim(),
-          message: message.trim(),
-          website: honeypot,
-        }),
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(
+          isFormspree
+            ? {
+                name: name.trim(),
+                email: email.trim(),
+                subject: subject.trim(),
+                _subject: `[CODEVORTEX] ${subject.trim()}`,
+                message: message.trim(),
+                _gotcha: honeypot,
+              }
+            : {
+                name: name.trim(),
+                email: email.trim(),
+                subject: subject.trim(),
+                message: message.trim(),
+                website: honeypot,
+              }
+        ),
       });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        // Static-host fallback when /api/contact is unavailable and Formspree is not yet configured
+        setMailtoFallbackHref(buildMailtoLink());
+        setServerError(
+          'Formspree endpoint is not configured yet. Send your pre-filled message directly via your email app below.'
+        );
+        return;
+      }
 
       const data = (await response.json()) as {
         success?: boolean;
+        ok?: boolean;
         message?: string;
+        error?: string;
         referenceId?: string;
-        errors?: FormErrors;
+        errors?: FormErrors | Array<{ field?: string; message?: string }>;
       };
 
-      if (!response.ok || !data.success) {
-        if (data.errors) {
+      if (!response.ok || (data.success === false && !data.ok)) {
+        if (Array.isArray(data.errors)) {
+          const mapped: FormErrors = {};
+          for (const item of data.errors) {
+            if (item.field && item.message && item.field in { name: 1, email: 1, subject: 1, message: 1 }) {
+              mapped[item.field as keyof FormErrors] = item.message;
+            }
+          }
+          setErrors(mapped);
+        } else if (data.errors) {
           setErrors(data.errors);
         }
-        setServerError(data.message || 'Unable to submit your message. Please check your inputs.');
+        setServerError(
+          data.error ||
+            data.message ||
+            'Unable to submit your message. Please check your inputs.'
+        );
         return;
       }
 
       setConfirmation({
-        referenceId: data.referenceId || 'CONFIRMED',
-        message: data.message || 'Your message has been received.',
+        referenceId: data.referenceId || 'SENT',
+        message:
+          data.message ||
+          'Your message has been delivered. I will respond as soon as possible.',
       });
       setName('');
       setEmail('');
       setSubject('');
       setMessage('');
     } catch {
+      setMailtoFallbackHref(buildMailtoLink());
       setServerError(
-        'Could not reach the server. Please verify the backend is running and try again.'
+        'Could not reach the form endpoint. You can send this exact message directly via your email app below.'
       );
     } finally {
       setSubmitting(false);
@@ -360,7 +417,18 @@ export function ContactSection({
                   className="mt-5 flex items-start gap-2.5 rounded-xl border border-rose-500/30 bg-rose-950/25 px-4 py-3 text-sm text-rose-200"
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" aria-hidden="true" />
-                  <span>{serverError}</span>
+                  <div className="space-y-2.5">
+                    <p>{serverError}</p>
+                    {mailtoFallbackHref && (
+                      <a
+                        href={mailtoFallbackHref}
+                        className="inline-flex items-center gap-2 rounded-lg border border-white/15 bg-white/[0.08] px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:border-cyan-400/50 hover:bg-white/[0.12]"
+                      >
+                        <Mail className="h-3.5 w-3.5 text-cyan-300" aria-hidden="true" />
+                        <span>Open Pre-Filled Email to {BRAND_PROFILE.email}</span>
+                      </a>
+                    )}
+                  </div>
                 </div>
               )}
 
